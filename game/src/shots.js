@@ -1,79 +1,67 @@
-// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
-// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
-// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
-// is what a short game really looks like and the same seed always gives the same frame.
-import { FIELD, PLAYER, STEP } from './config.js';
-import { EVENT_OVER, KIND_BLOCK } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// Screenshot scenes behind ?shot=start|foot|chase|mission. Each one plays
+// the real rules forward from a fresh world with a fixed seed, steered by a
+// simple autopilot, so the frame is what a short game really looks like and
+// the same seed always gives the same frame. Driving scenes run along a
+// straight street, the way a player actually drives, so the car does not
+// cut across buildings.
+import { STEP } from './config.js';
+import { SCREEN_PLAY, SCREEN_TITLE } from './render.js';
 
-const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
-const END_LIMIT_SECONDS = 600;
-/**
- * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
- * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
- * caught out once the blocks speed up, as a hurried player is.
- */
-const HORIZON_PLAY = 0.7;
-const HORIZON_END = 0.25;
-const SAMPLE = 1 / 30;
-const DIRECTIONS = [0, -1, 1];
-/** Extra room, each side, it keeps between the paddle and a block. */
-const MARGIN = 10;
-
-/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
-function timeToHit(state, direction, horizon) {
-  const player = state.player;
-  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
-    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
-    for (let index = 0; index < state.items.length; index += 1) {
-      const item = state.items[index];
-      if (!item.active || item.kind !== KIND_BLOCK) continue;
-      const y = item.y + item.speed * t;
-      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
-    }
-  }
-  return Infinity;
+/** Steer the player on foot toward a target point. */
+function steerTo(world, tx, ty) {
+  const p = world.player;
+  const dx = tx - p.x;
+  const dy = ty - p.y;
+  const len = Math.hypot(dx, dy) || 1;
+  return { mx: dx / len, my: dy / len, run: true, enter: false, punch: false };
 }
 
-/** Of the safe ways to move, the one toward the lowest coin (or the centre); else the one that is hit last. */
-function autopilot(state, horizon) {
-  const player = state.player;
-  let coin = null;
-  for (let index = 0; index < state.items.length; index += 1) {
-    const item = state.items[index];
-    if (item.active && item.kind !== KIND_BLOCK && (coin === null || item.y > coin.y)) coin = item;
-  }
-  const target = coin === null ? FIELD.width / 2 : coin.x + coin.width / 2;
-  const centre = player.x + player.width / 2;
-  const wanted = target > centre + 8 ? 1 : target < centre - 8 ? -1 : 0;
-  let best = wanted;
-  let bestTime = timeToHit(state, wanted, horizon);
-  for (let index = 0; index < DIRECTIONS.length && bestTime !== Infinity; index += 1) {
-    const time = timeToHit(state, DIRECTIONS[index], horizon);
-    if (time > bestTime) {
-      bestTime = time;
-      best = DIRECTIONS[index];
-    }
-  }
-  return best;
+/** Drive straight along a street: full throttle, no steering. */
+function driveStraight() {
+  return { mx: 0, my: 0, run: false, enter: false, punch: false, throttle: 1, steer: 0 };
 }
 
-/**
- * Set `world` to the named scene (start, play or end; any other name is start) and return the
- * screen to draw over it and the best score to show.
- */
+function stepWorld(world, seconds, inputFn) {
+  const steps = Math.floor(seconds / STEP);
+  for (let i = 0; i < steps; i += 1) world.step(STEP, inputFn());
+}
+
+/** Put the player in a car parked on a street, facing east. */
+function putInCar(world, x, y) {
+  const car = world.traffic.cars.find((c) => c.kind === 'parked');
+  car.x = x; car.y = y; car.angle = 0; car.speed = 0;
+  world.player.x = x; world.player.y = y;
+  world.step(STEP, { mx: 0, my: 0, run: false, enter: true, punch: false });
+  world.combat.addArmor(100);
+  world.combat.heal(100);
+}
+
 export function stageShot(name, world) {
   world.reset();
-  if (name !== 'play' && name !== 'end') {
-    for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, 0, true);
-    return { screen: SCREEN_TITLE, best: 0 };
+  if (name === 'foot') {
+    // Walk through Old Town toward Rico's pier, with traffic and peds around.
+    world.player.x = 900; world.player.y = 480;
+    world.camera.x = world.player.x; world.camera.y = world.player.y;
+    stepWorld(world, 6, () => steerTo(world, 480, 200));
+    return { screen: SCREEN_PLAY, best: world.state.cash };
   }
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const horizon = name === 'end' ? HORIZON_END : HORIZON_PLAY;
-  for (let index = 0; index < limit / STEP; index += 1) {
-    if (world.step(STEP, autopilot(world.state, horizon), false) & EVENT_OVER) break;
+  if (name === 'chase') {
+    // Steal a car on the Marina street, get 3 stars, and run east from
+    // police cars that spawn behind the player.
+    putInCar(world, 500, 480);
+    world.police.setWanted(3);
+    stepWorld(world, 3.5, driveStraight);
+    return { screen: SCREEN_PLAY, best: world.state.cash };
   }
-  const over = world.state.lives === 0;
-  return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
+  if (name === 'mission') {
+    // Mission 2 in progress: drive east along the Old Town street toward
+    // the first package, with the timer and wanted stars on the HUD.
+    world.missions.start(1);
+    putInCar(world, 1200, 480);
+    stepWorld(world, 1.5, driveStraight);
+    return { screen: SCREEN_PLAY, best: world.state.cash };
+  }
+  // start (default): the title screen over a living city.
+  stepWorld(world, 4, () => ({ mx: 0, my: 0, run: false, enter: false, punch: false }));
+  return { screen: SCREEN_TITLE, best: 0 };
 }
